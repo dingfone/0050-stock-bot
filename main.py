@@ -1,47 +1,55 @@
 from flask import Flask, redirect, url_for, Response
-import yfinance as yf
 import os
 import requests
+from datetime import datetime
 
 app = Flask(__name__)
 
+HEADERS = {
+    "User-Agent": "Mozilla/5.0"
+}
+
+def fetch_yahoo_price(symbol):
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=2d"
+    resp = requests.get(url, headers=HEADERS)
+    data = resp.json()
+
+    result = data["chart"]["result"][0]
+    meta = result["meta"]
+    quote = result["indicators"]["quote"][0]
+
+    current_price = meta["regularMarketPrice"]
+    close_prices = quote["close"]
+
+    if len(close_prices) >= 2:
+        prev_close = close_prices[-2]
+    else:
+        prev_close = meta.get("chartPreviousClose", current_price)
+
+    change_pct = ((current_price - prev_close) / prev_close) * 100
+    timestamp = datetime.fromtimestamp(meta["regularMarketTime"]).strftime("%Y-%m-%d %H:%M:%S")
+
+    return current_price, prev_close, change_pct, timestamp
+
 def get_0050_price_and_change():
-    stock = yf.Ticker("0050.TW")
-    data = stock.history(period="2d", interval="30m")
-    if data.empty or len(data) < 2:
-        return None
-
-    data_by_day = data.groupby(data.index.date)
-    if len(data_by_day) < 2:
-        return None
-
-    yesterday = sorted(list(data_by_day.groups.keys()))[-2]
-    yesterday_close = data_by_day.get_group(yesterday).iloc[-1]['Close']
-    latest_row = data.iloc[-1]
-    current_price = latest_row['Close']
-    drop_percent = (current_price - yesterday_close) / yesterday_close
-    timestamp = data.index[-1].strftime("%Y-%m-%d %H:%M:%S")
-
-    return current_price, drop_percent, yesterday_close, timestamp
+    return fetch_yahoo_price("0050.TW")
 
 def get_vix_if_high():
-    vix = yf.Ticker("^VIX")
-    vix_data = vix.history(period="1d")
-    if vix_data.empty:
+    try:
+        current, prev, chg, _ = fetch_yahoo_price("^VIX")
+        if current > 32:
+            return current
+    except:
         return None
-    vix_value = vix_data['Close'].iloc[-1]
-    if vix_value > 32:
-        return vix_value
     return None
 
 def get_treasury_yield_30y_if_high():
-    tyx = yf.Ticker("^TYX")
-    data = tyx.history(period="1d")
-    if data.empty:
+    try:
+        current, prev, chg, _ = fetch_yahoo_price("^TYX")
+        if current > 4.9:
+            return current
+    except:
         return None
-    latest_yield = data['Close'].iloc[-1]
-    if latest_yield > 4.9:
-        return latest_yield
     return None
 
 def send_bark_notification(title, body):
@@ -64,13 +72,14 @@ def stock_report():
     messages = []
 
     # 0050 判斷與通知
-    result = get_0050_price_and_change()
-    if result:
-        current_price, drop_percent, yesterday_close, timestamp = result
-        if drop_percent <= -0.015:
-            body = f"{timestamp}\n漲跌幅：{drop_percent*100:.2f}%\n現價：{current_price:.2f}\n昨日收：{yesterday_close:.2f}"
+    try:
+        current_price, prev_close, drop_percent, timestamp = get_0050_price_and_change()
+        if drop_percent <= -1.5:
+            body = f"{timestamp}\n漲跌幅：{drop_percent:.2f}%\n現價：{current_price:.2f}\n昨日收：{prev_close:.2f}"
             send_bark_notification("📉 0050 跌幅警告", body)
             messages.append("✅ 傳送 0050 通知")
+    except Exception as e:
+        messages.append(f"0050 錯誤: {e}")
 
     # VIX 判斷與通知
     vix_value = get_vix_if_high()
@@ -84,7 +93,7 @@ def stock_report():
     if tyx_value:
         body = f"30Y 美債殖利率過高：{tyx_value:.2f}%"
         send_bark_notification("⚠️ 美債殖利率警告", body)
-        messages.append("✅ 傳送美債殖利率通知")
+        messages.append("✅ 傳送美債通知")
 
     return Response("\n".join(messages) if messages else "✅ 無需通知", mimetype="text/plain")
 
